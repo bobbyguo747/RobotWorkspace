@@ -1,0 +1,102 @@
+TebLocalPlannerROS:
+
+  odom_topic: /odometry/filtered  # TEB使用的里程计话题，必须和EKF/底盘发布的里程计一致
+
+  # ================= 轨迹时间离散参数 =================
+  teb_autosize: True  # 自动调整轨迹点数量，保持true
+  dt_ref: 0.45  # 轨迹相邻位姿的时间间隔；从0.25放到0.35，减少局部轨迹过细导致的原地抖动  0.35
+  dt_hysteresis: 0.10  # 轨迹点增减的滞回范围，避免轨迹数量频繁变化
+  global_plan_overwrite_orientation: True  # 使用全局路径方向作为局部路径朝向，让红线尽量顺着绿线走
+  allow_init_with_backwards_motion: False  # 禁止用倒车初始化轨迹，重点解决开局/换点时先倒车的问题
+  max_global_plan_lookahead_dist: 1.2  # TEB只看前方1.2m全局路径，避免看太远后横切、掉头、抄近路
+  feasibility_check_no_poses: 12  # 检查更多轨迹点是否可行，减少红线穿墙/贴墙后仍执行
+  exact_arc_length: False  # 不精确计算弧长，省算力
+  force_reinit_new_goal_dist: 1.5  # 新目标距离变化超过1.5m才强制重初始化，减少连续点之间反复重规划
+
+  # ================= 机器人速度与加速度限制 =================
+  max_vel_x: 1.00  # 最大前进速度；本版先保守，让车先稳定走起来，稳定后可加到0.60
+  max_vel_x_backwards: 0.25  # 最大倒车速度，近似禁止长距离倒车，但保留极小倒车能力避免优化器报错0.25
+  max_vel_y: 0.0  # 阿克曼车不能横移，必须为0
+  max_vel_theta: 1.00  # 限制转向对应的角速度，减少前轮左右反复打死
+  acc_lim_x: 0.75  # 降低前后加速度，减少后轮前后小幅抽动
+  acc_lim_theta: 0.75  # 降低角加速度，减少前轮快速左右摆动
+
+  # ================= 阿克曼底盘运动学参数 =================
+  min_turning_radius: 0.47  # 恢复接近原始值；过大反而容易迫使TEB用倒车/掉头完成转弯0.47
+  wheelbase: 0.21  # 轴距，前后轮中心距离，按原车参数保留
+  cmd_angle_instead_rotvel: False  # 输出/cmd_vel角速度；若底盘实际需要转向角才改true
+
+  # ================= 机器人外形模型 =================
+  is_footprint_dynamic: False  # 机器人轮廓不动态变化
+  footprint_model:
+    type: "polygon"  # 用多边形车体，避免TEB把车当线处理
+    vertices: [[0.14, -0.12], [0.14, 0.12], [-0.20, 0.12], [-0.20, -0.12]]  # 车体轮廓，前14cm后20cm左右12cm，兼顾安全和不堵路
+
+  # ================= 到点容忍度 =================
+  xy_goal_tolerance: 0.12  # 放宽位置容差，减少进点前后挪动
+  yaw_goal_tolerance: 0.60  # 大幅放宽角度容差，避免为了对准目标角度而长距离倒车/掉头 0.75
+  free_goal_vel: False  # 到点时停车
+
+  # ================= 障碍物与安全距离 =================
+  min_obstacle_dist: 0.18  # 先不过度加大安全距离，避免窄道被挤死导致无法前进#0.18
+  inflation_dist: 0.32  # TEB内部障碍物影响距离，略大于min_obstacle_dist0.32
+  include_costmap_obstacles: True  # 使用costmap障碍物
+  include_dynamic_obstacles: False  # 关闭动态障碍预测
+  costmap_obstacles_behind_robot_dist: 0.25  # 只保留车后25cm障碍参与规划，避免TEB因后方墙体而优先构造倒车轨迹
+  dynamic_obstacle_inflation_dist: 0.32  # 动态障碍膨胀距离，动态障碍关闭时影响小
+  obstacle_poses_affected: 12  # 降低单个障碍影响的轨迹点数量，减少全程被墙强烈牵制而抖动
+  costmap_converter_plugin: ""  # 不使用costmap转换插件
+  costmap_converter_spin_thread: True  # 插件线程，空插件时影响很小
+  costmap_converter_rate: 5  # 插件频率，空插件时影响很小
+  legacy_obstacle_association: False  # 使用新版障碍关联
+  obstacle_association_cutoff_factor: 5.0  # 障碍关联截断系数
+  obstacle_association_force_inclusion_factor: 1.5  # 强制纳入近距离障碍
+
+  # ================= 优化器权重 =================
+  no_inner_iterations: 4  # 内层优化次数，降低一点可减少过度优化造成的原地折腾
+  no_outer_iterations: 3  # 外层优化次数，降低一点可减少局部轨迹跳变
+  optimization_activate: True  # 启用TEB优化
+  optimization_verbose: False  # 不打印优化细节
+  penalty_epsilon: 0.08  # 软约束缓冲，减少接近限制时的突变抖动
+  weight_max_vel_x: 2.0  # 超过最大线速度的惩罚
+  weight_max_vel_theta: 1.0  # 超过最大角速度的惩罚
+  weight_acc_lim_x: 1.0  # 超过线加速度的惩罚
+  weight_acc_lim_theta: 1.0  # 超过角加速度的惩罚
+  weight_kinematics_nh: 1000.0  # 非完整约束权重，阿克曼车不能横移，保持较大
+  weight_kinematics_forward_drive: 15000.0  # 极强前进优先，重点压制长距离倒车
+  weight_kinematics_turning_radius: 8.0  # 降低转弯半径惩罚，避免因转不过而选择倒车掉头
+  weight_optimaltime: 1  # 时间最优权重，不是主因但不宜太高 0.8
+  weight_obstacle: 40.0  # 障碍物权重降到中等，避免在窄道中被障碍代价压得不敢前进 65
+  weight_dynamic_obstacle: 20.0  # 动态障碍关闭时影响小
+  obstacle_cost_exponent: 2.0  # 降低障碍代价指数，减少靠近高代价区时突然抽搐
+  weight_adapt_factor: 1.1  # 权重自适应放大系数，降低避免越优化越极端
+  weight_dynamic_obstacle_inflation: 1.0  # 动态障碍膨胀权重，影响小
+  weight_inflation: 0.15  # 膨胀区权重降低，避免被大面积膨胀区卡住不走
+  weight_shortest_path: 0.2  # 降低最短路径倾向，避免红线抄近路切墙
+  weight_viapoint: 35.0  # 中等跟随全局路径，避免过高导致贴着绿线局部抖动
+
+  # ================= 同伦路径规划 =================
+  enable_homotopy_class_planning: False  # 关闭多路径搜索，减少路线跳变和掉头倾向
+  enable_multithreading: True  # 允许多线程
+  simple_exploration: False  # 同伦关闭时影响小
+  max_number_classes: 1  # 只保留一类路径，避免路径切换
+  selection_cost_hysteresis: 1.0  # 路径切换滞回
+  selection_obst_cost_scale: 1.0  # 障碍代价缩放
+  selection_viapoint_cost_scale: 1.0  # 途经点代价缩放
+  selection_alternative_time_cost: False  # 不使用替代时间代价
+  roadmap_graph_no_samples: 10  # 同伦关闭时影响小
+  roadmap_graph_area_width: 3  # 同伦关闭时影响小
+  roadmap_graph_area_length_scale: 1.0  # 同伦关闭时影响小
+  h_signature_prescaler: 0.5  # 同伦关闭时影响小
+  h_signature_threshold: 0.1  # 同伦关闭时影响小
+  obstacle_keypoint_offset: 0.1  # 同伦关闭时影响小
+  obstacle_heading_threshold: 0.45  # 同伦关闭时影响小
+  visualize_hc_graph: False  # 不显示同伦图
+
+  # ================= 全局路径途经点 =================
+  global_plan_viapoint_sep: 0.45  # 每0.45m取一个全局路径点，既跟随绿线又不过度拉扯
+  via_points_ordered: True  # 强制按顺序跟随全局路径点，减少红线横切和掉头
+
+  # ================= 恢复行为 =================
+  oscillation_recovery: False  # 关闭TEB自身振荡恢复，避免卡住时自动倒车/掉头尝试
+  shrink_horizon_backup: False  # 关闭缩短视野恢复，避免近目标时反复前后抽动

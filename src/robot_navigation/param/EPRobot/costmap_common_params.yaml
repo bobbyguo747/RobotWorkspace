@@ -1,0 +1,29 @@
+# ================= 机器人外形与代价地图公共参数 =================
+# 本版重点：不要把车体设得过大，否则窄道里会被代价地图挤死，TEB反而前后抽动。
+footprint: [[0.14, -0.12], [0.14, 0.12], [-0.20, 0.12], [-0.20, -0.12]]  # 机器人矩形轮廓，前14cm后20cm左右12cm；如果实车仍蹭墙，再把左右改到0.13或0.14
+footprint_padding: 0.01  # 额外安全边距1cm；上一版过大可能导致局部空间太窄
+
+transform_tolerance: 0.5  # TF容忍时间，避免定位/TF轻微延迟导致costmap跳动
+map_type: map  # 代价地图类型
+
+# ================= 障碍物层配置 =================
+obstacle_layer:
+  enabled: true  # 启用障碍物层
+  obstacle_range: 2.5  # 标记障碍物距离，降低远处噪声影响
+  raytrace_range: 3.0  # 清除障碍物距离，略大于obstacle_range
+  track_unknown_space: false  # 局部避障中不把未知区强烈当障碍，减少起步被未知区卡住
+  combination_method: 1  # 图层融合方式，取最大代价
+
+  observation_sources: laser_scan_sensor  # 使用激光雷达作为观测源
+  laser_scan_sensor: {data_type: LaserScan, topic: scan, marking: true, clearing: true}  # scan话题用于标记和清除障碍
+
+# ================= 膨胀层配置 =================
+inflation_layer:
+  enabled: true  # 启用膨胀层
+  cost_scaling_factor: 8.0  # 膨胀代价衰减更快，避免整条路全是高代价导致车不敢走##8.0
+  inflation_radius: 0.2  # 膨胀半径降到0.26，防止窄道封死和原地微
+
+# ================= 静态地图层配置 =================
+static_layer:
+  enabled: true  # 启用静态地图层
+  map_topic: "/map"  # 地图话题

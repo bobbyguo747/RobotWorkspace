@@ -1,0 +1,13 @@
+# ================= move_base主控制参数 =================
+controller_frequency: 8.0  # 控制频率；10Hz有时会让局部轨迹频繁更新，本版降到8Hz更稳 
+controller_patience: 8.0   # 局部规划失败等待时间，避免卡太久
+
+planner_frequency: 0.4     # 全局路径重规划频率降到0.5Hz，避免绿线频繁变化引起红线来回跳
+planner_patience: 5.0      # 全局规划失败等待时间
+
+conservative_reset_dist: 0.2  # 清理局部代价地图的范围，太大会影响障碍稳定性
+
+oscillation_timeout: 6.0   # 振荡6秒后判定异常，避免一直原地打轮
+oscillation_distance: 0.15 # 小于15cm来回动视为可能振荡
+
+clearing_rotation_allowed: false  # 阿克曼底盘不能原地旋转清障，必须关闭

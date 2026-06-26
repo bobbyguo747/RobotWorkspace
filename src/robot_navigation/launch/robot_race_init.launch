@@ -1,0 +1,56 @@
+<launch>
+  <!-- ================= 基础启动参数 ================= -->
+  <arg name="map_file" default="$(find robot_navigation)/maps/map.yaml"/> <!-- 地图yaml文件路径，默认加载robot_navigation/maps/map.yaml -->
+  <arg name="simulation" default="false"/> <!-- 是否使用仿真模式；真实小车运行时保持false -->
+  <arg name="planner" default="teb" doc="opt: dwa, teb"/> <!-- 局部规划器选择；阿克曼底盘建议使用teb -->
+  <arg name="open_rviz" default="false"/> <!-- 是否随本launch一起打开rviz；比赛/实车可保持false -->
+  <arg name="lidar_mode" default="Boost"/> <!-- 雷达工作模式参数，传给雷达launch时使用 -->
+  <arg name="is_send_anger" default="false"/> <!-- 是否发送雷达角度相关配置，按原工程保持false -->
+
+  <group if="$(arg simulation)">
+    <include file="$(find robot_navigation)/simulation/simulation.launch"/> <!-- 仿真模式下启动仿真小车、雷达和地图 -->
+  </group>
+
+  <group unless="$(arg simulation)">
+    <!-- ================= TF静态坐标变换 ================= -->
+    <node pkg="tf" type="static_transform_publisher" name="base_to_link" args="0.00 0 0 0 0 0 base_footprint base_link 100" /> <!-- base_footprint到base_link的静态变换 -->
+    <node pkg="tf" type="static_transform_publisher" name="base_to_gyro" args="0.08 0 0 0 0 0 base_link IMU_link 100" /> <!-- base_link到IMU的静态变换，0.08表示IMU相对车体前移8cm -->
+    <node pkg="tf" type="static_transform_publisher" name="base_to_laser" args="0.14 0 0.11 0 0 0 base_link base_laser_link 100" /> <!-- base_link到激光雷达的静态变换，需与实车安装位置一致 -->
+    <node pkg="tf" type="static_transform_publisher" name="base_to_camera" args="0.14 0 0.11 0 0 0 base_link camera_link 100" /> <!-- base_link到相机的静态变换，需与实车安装位置一致 -->
+
+    <!-- ================= 雷达、地图、定位 ================= -->
+    <include file="$(find robot_navigation)/launch/robot_lidar.launch">
+      <arg name="is_send_anger" value="$(arg is_send_anger)"/> <!-- 将雷达角度配置参数传给雷达启动文件 -->
+    </include>
+
+    <node pkg="map_server" name="map_server" type="map_server" args="$(arg map_file)">
+      <param name="frame_id" value="map"/> <!-- 地图坐标系名称 -->
+    </node>
+
+    <node pkg="talos_laser_loc" type="talos_laser_loc" name="talos_laser_loc" output="screen">
+      <param name="base_frame" value="base_footprint"/> <!-- 小车底盘坐标系 -->
+      <param name="odom_frame" value="odom"/> <!-- 里程计坐标系 -->
+      <param name="laser_frame" value="base_laser_link"/> <!-- 激光雷达坐标系 -->
+      <param name="laser_topic" value="scan_filtered"/> <!-- 定位使用的激光雷达话题 -->
+    </node>
+
+    <node pkg="talos_laser_loc" type="talos_costmap_cleaner" name="talos_costmap_cleaner" /> <!-- 自动清理异常代价地图，减少虚假障碍物残留 -->
+  </group>
+
+  <!-- ================= move_base导航主节点 ================= -->
+  <include file="$(find robot_navigation)/launch/move_base.launch">
+    <arg name="planner" value="$(arg planner)"/> <!-- 将teb/dwa选择传给move_base启动文件 -->
+    <arg name="simulation" value="$(arg simulation)"/> <!-- 将仿真/实车模式传给move_base启动文件 -->
+    <arg name="odom_topic" value="/odometry/filtered"/> <!-- move_base使用EKF融合后的里程计话题 -->
+  </include>
+
+  <!-- ================= EKF里程计融合 ================= -->
+  <node name="ekf_se" pkg="robot_localization" type="ekf_localization_node" clear_params="true">
+    <rosparam command="load" file="$(find robot_navigation)/param/EPRobot/ekf_params.yaml"/> <!-- 加载EKF参数，用于融合轮速/IMU等里程计信息 -->
+  </node>
+
+  <!-- ================= RViz显示 ================= -->
+  <group if="$(arg open_rviz)">
+    <node pkg="rviz" type="rviz" name="rviz" required="true" args="-d $(find robot_navigation)/rviz/navigation.rviz"/> <!-- 根据open_rviz参数决定是否打开RViz -->
+  </group>
+</launch>
