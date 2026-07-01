@@ -3,15 +3,15 @@
 """
 F1_detect_code0719.py
 
-0719 二维码识别低延迟重构版：
-1. 不再通过 web_video_server / HTTP 视频流读取图像，改为直接订阅 /camera/rgb/image_raw。
-2. Subscriber 使用 queue_size=1，只处理最新帧，避免 20~30 秒缓存延迟。
-3. 保留原工程 pyzbar 二维码识别、A/B/C 任务映射、/cam_return 与 /vision_report 输出接口。
-4. 使用“短时间投票 + 稳定锁定 + 重复发布”：
-   - 最近 vote_max_age 秒内同一结果出现 stable_vote_need 次且占比达到 stable_ratio，才认为稳定；
-   - 稳定后锁定 publish_hold_sec 秒，并每 republish_interval 秒重复发布；
-   - 防止主控刚进入 count==9/count==10 时错过识别结果。
-5. 不包含任何导航、运动控制、电机控制代码。
+BUGFIX_V4_FORCE_MULTI_QR_20260701
+
+0719 二维码识别低延迟修正版：
+1. 直接订阅 /camera/rgb/image_raw，不走 web_video_server，避免 20~30 秒缓存延迟。
+2. 保留 /cam_return 和 /vision_report 输出接口。
+3. window_roi 成功时优先使用四个大窗口框排序结果。
+4. fallback / quadrant 只作为兜底；兜底至少识别到 2 个合法二维码才参与投票。
+5. fallback 横向分界默认 0.62，避免识别板偏在画面一侧时把 1/3 误判成 2/4。
+6. 稳定投票后锁定并重复发布，方便主控 count==9/count==10 接收。
 
 发布：
   /cam_return     Int32MultiArray: [C, A, B, count, target_area, error_count]
@@ -41,6 +41,8 @@ try:
 except NameError:
     unicode = str
 
+
+VERSION_TAG = 'BUGFIX_V4_FORCE_MULTI_QR_20260701'
 
 VALID_CV = ['A', 'B', 'C', 'AB', 'AC', 'BC', 'ABC']
 NORMAL_CV = ['A', 'B', 'C', 'AB', 'AC', 'BC', 'ABC', '']
@@ -75,6 +77,9 @@ VOTE_MAX_AGE = 1.8
 PUBLISH_HOLD_SEC = 8.0
 REPUBLISH_INTERVAL = 0.2
 ALLOW_FALLBACK_VOTE = True
+FALLBACK_MIN_NONEMPTY = 2
+FALLBACK_X_SPLIT_RATIO = 0.62
+FALLBACK_Y_SPLIT_RATIO = 0.50
 DEBUG_LOG = True
 
 
@@ -115,6 +120,14 @@ def normalize_cv_text(value):
             return ''
 
     return ''
+
+
+def nonempty_count(all_data):
+    count = 0
+    for item in all_data:
+        if normalize_cv_text(item) in VALID_CV:
+            count += 1
+    return count
 
 
 def build_decode_candidates(crop):
@@ -168,9 +181,18 @@ def decode_crop_best(crop):
 
 
 def area_index_from_center(cx, cy, width, height):
-    if cy < height / 2.0:
-        return 0 if cx < width / 2.0 else 1
-    return 2 if cx < width / 2.0 else 3
+    """
+    fallback 兜底区域划分。
+    注意：不再使用画面正中 0.50 作为左右分界，默认改为 0.62。
+    这是为了适配当前识别板整体偏在画面左/右一侧的情况，
+    避免把真实 1/3 误判成 2/4。
+    """
+    split_x = float(width) * float(FALLBACK_X_SPLIT_RATIO)
+    split_y = float(height) * float(FALLBACK_Y_SPLIT_RATIO)
+
+    if cy < split_y:
+        return 0 if cx < split_x else 1
+    return 2 if cx < split_x else 3
 
 
 def rotate_frame(frame):
@@ -185,9 +207,8 @@ def rotate_frame(frame):
 
 def decode_whole_frame_by_position(frame):
     """
-    低延迟主路径：
-    整图直接 pyzbar 解码，再按二维码中心所在象限映射到 1/2/3/4 区。
-    该结果不直接发布，必须经过 vote_history 投票稳定后才输出。
+    整图直接 pyzbar 解码，再按二维码中心位置映射到 1/2/3/4 区。
+    该结果不直接发布，必须经过 fallback_min_nonempty 和投票。
     """
     h, w = frame.shape[:2]
     all_data = ['', '', '', '']
@@ -226,15 +247,20 @@ def decode_whole_frame_by_position(frame):
 def decode_by_direct_quadrants(frame):
     """
     最后兜底：整图定位不到时，直接按画面四象限裁剪识别。
-    该结果也必须经过投票稳定后才输出。
+    该结果也必须经过 fallback_min_nonempty 和投票。
     """
     h, w = frame.shape[:2]
 
+    sx = int(float(w) * float(FALLBACK_X_SPLIT_RATIO))
+    sy = int(float(h) * float(FALLBACK_Y_SPLIT_RATIO))
+    sx = max(1, min(w - 1, sx))
+    sy = max(1, min(h - 1, sy))
+
     crops = [
-        frame[0:h // 2, 0:w // 2],
-        frame[0:h // 2, w // 2:w],
-        frame[h // 2:h, 0:w // 2],
-        frame[h // 2:h, w // 2:w]
+        frame[0:sy, 0:sx],
+        frame[0:sy, sx:w],
+        frame[sy:h, 0:sx],
+        frame[sy:h, sx:w]
     ]
 
     return [decode_crop_best(crop) for crop in crops]
@@ -243,19 +269,20 @@ def decode_by_direct_quadrants(frame):
 def find_window_boxes(frame):
     """
     尝试识别四个大窗口黑框。
-    实测中该路径可能不稳定，因此只作为优先尝试；失败后仍走 fallback_vote。
+    V4 改动：RETR_LIST 比 RETR_EXTERNAL 更容易在屏幕/边框干扰下找到内部窗口框。
     """
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     try:
+        # 黑色边框在阈值反相图里变成白色。
         _, th = cv2.threshold(
             gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
         )
         kernel = np.ones((5, 5), np.uint8)
         th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        result = cv2.findContours(th, cv2.RETR_EXTERNAL,
+        result = cv2.findContours(th, cv2.RETR_LIST,
                                   cv2.CHAIN_APPROX_SIMPLE)
         if len(result) == 3:
             _, contours, hierarchy = result
@@ -265,8 +292,8 @@ def find_window_boxes(frame):
         return []
 
     boxes = []
-    min_area = max(2500.0, float(w * h) * 0.015)
-    max_area = float(w * h) * 0.45
+    min_area = max(2500.0, float(w * h) * 0.012)
+    max_area = float(w * h) * 0.35
 
     for c in contours:
         area = abs(cv2.contourArea(c))
@@ -274,7 +301,7 @@ def find_window_boxes(frame):
             continue
 
         peri = cv2.arcLength(c, True)
-        approx = cv2.approxPolyDP(c, 0.03 * peri, True)
+        approx = cv2.approxPolyDP(c, 0.035 * peri, True)
         if len(approx) < 4:
             continue
 
@@ -282,17 +309,21 @@ def find_window_boxes(frame):
         if bw <= 0 or bh <= 0:
             continue
 
-        ratio = float(bw) / float(bh)
-        if ratio < 0.55 or ratio > 1.80:
+        # 过滤贴边的大屏幕外框/画面黑边。
+        if x <= 2 or y <= 2 or x + bw >= w - 2 or y + bh >= h - 2:
             continue
 
-        # 黑框内部必须有足够面积，避免把数字、Logo、小圆点当窗口。
-        if bw < w * 0.12 or bh < h * 0.12:
+        ratio = float(bw) / float(bh)
+        if ratio < 0.50 or ratio > 1.90:
+            continue
+
+        # 过滤二维码内部小定位块、文字、小噪点。
+        if bw < w * 0.13 or bh < h * 0.13:
             continue
 
         boxes.append((x, y, bw, bh, area))
 
-    # 去重：外框和内框可能都被检测到，中心太近时保留面积大的。
+    # 去重：同一个窗口可能检测到内外两层框，中心接近时保留面积大的。
     boxes = sorted(boxes, key=lambda b: b[4], reverse=True)
     filtered = []
     for b in boxes:
@@ -300,6 +331,7 @@ def find_window_boxes(frame):
         cx = x + bw / 2.0
         cy = y + bh / 2.0
         duplicate = False
+
         for fb in filtered:
             fx, fy, fw, fh, farea = fb
             fcx = fx + fw / 2.0
@@ -308,6 +340,7 @@ def find_window_boxes(frame):
                abs(cy - fcy) < min(bh, fh) * 0.45:
                 duplicate = True
                 break
+
         if not duplicate:
             filtered.append(b)
 
@@ -334,7 +367,7 @@ def decode_by_window_boxes(frame):
     for box in boxes:
         x, y, bw, bh, area = box
 
-        # 向内缩一点，避开外部粗黑框；再给二维码留足区域。
+        # 向内缩一点，避开粗黑框。
         pad_x = int(bw * 0.06)
         pad_y = int(bh * 0.06)
         x1 = max(0, x + pad_x)
@@ -437,7 +470,6 @@ def get_voted_result():
     if best_count < STABLE_VOTE_NEED or ratio < STABLE_RATIO:
         return None
 
-    # 取最新一次该结果的附带信息。
     best_item = None
     for item in reversed(vote_history):
         if item[1] == best_key:
@@ -458,7 +490,7 @@ def publish_outputs(data_list, img_abc, source):
     msg = Int32MultiArray()
     msg.data = list(data_list)
     pub_flag.publish(msg)
-    pub_vision_str.publish(String(img_abc))
+    pub_vision_str.publish(img_abc)
 
     rospy.logwarn(
         'publish /cam_return: %s source=%s CV=%s target=%d' %
@@ -536,6 +568,7 @@ def handle_stable_candidate(voted_result):
 def process_frame(frame):
     frame = rotate_frame(frame)
 
+    # 优先使用窗口框 ROI；如果能稳定找到四个窗口，单码也可信。
     all_data, source = decode_by_window_boxes(frame)
     result = task_data_from_all_data(all_data)
 
@@ -545,25 +578,39 @@ def process_frame(frame):
         return
 
     if ALLOW_FALLBACK_VOTE:
+        # fallback 只看到单个码时不计票，避免 target 2/4 乱跳。
         all_data = decode_whole_frame_by_position(frame)
-        result = task_data_from_all_data(all_data)
-        if result is not None:
-            data_list, img_abc, target_area = result
-            add_vote(data_list, img_abc, 'fallback_vote', all_data)
-            return
+        if nonempty_count(all_data) >= FALLBACK_MIN_NONEMPTY:
+            result = task_data_from_all_data(all_data)
+            if result is not None:
+                data_list, img_abc, target_area = result
+                add_vote(data_list, img_abc, 'fallback_vote', all_data)
+                return
+        elif nonempty_count(all_data) > 0:
+            rospy.logwarn_throttle(
+                0.5,
+                'fallback 单码结果暂不计票: %s' % safe_repr(all_data)
+            )
 
         all_data = decode_by_direct_quadrants(frame)
-        result = task_data_from_all_data(all_data)
-        if result is not None:
-            data_list, img_abc, target_area = result
-            add_vote(data_list, img_abc, 'quadrant_vote', all_data)
-            return
+        if nonempty_count(all_data) >= FALLBACK_MIN_NONEMPTY:
+            result = task_data_from_all_data(all_data)
+            if result is not None:
+                data_list, img_abc, target_area = result
+                add_vote(data_list, img_abc, 'quadrant_vote', all_data)
+                return
+        elif nonempty_count(all_data) > 0:
+            rospy.logwarn_throttle(
+                0.5,
+                'quadrant 单码结果暂不计票: %s' % safe_repr(all_data)
+            )
 
     if DEBUG_LOG:
         rospy.loginfo_throttle(
             1.0,
-            '等待稳定识别: window=%s source=%s fallback=%s' %
-            (safe_repr(all_data), source, safe_repr(['', '', '', '']))
+            '等待稳定识别: window=%s source=%s fallback_min=%d split=%.2f' %
+            (safe_repr(all_data), source, FALLBACK_MIN_NONEMPTY,
+             FALLBACK_X_SPLIT_RATIO)
         )
 
 
@@ -585,7 +632,9 @@ def main():
     global pub_flag, pub_vision_str, bridge
     global ROTATE_ANGLE, PROCESS_HZ, STABLE_VOTE_NEED, STABLE_RATIO
     global VOTE_MAX_AGE, PUBLISH_HOLD_SEC, REPUBLISH_INTERVAL
-    global ALLOW_FALLBACK_VOTE, DEBUG_LOG, processed_frame_seq
+    global ALLOW_FALLBACK_VOTE, FALLBACK_MIN_NONEMPTY
+    global FALLBACK_X_SPLIT_RATIO, FALLBACK_Y_SPLIT_RATIO
+    global DEBUG_LOG, processed_frame_seq
 
     rospy.init_node('detect_abc', anonymous=True)
 
@@ -609,13 +658,18 @@ def main():
     PUBLISH_HOLD_SEC = float(rospy.get_param('~publish_hold_sec', 8.0))
     REPUBLISH_INTERVAL = float(rospy.get_param('~republish_interval', 0.2))
     ALLOW_FALLBACK_VOTE = bool(rospy.get_param('~allow_fallback_vote', True))
+    FALLBACK_MIN_NONEMPTY = int(rospy.get_param('~fallback_min_nonempty', 2))
+    FALLBACK_X_SPLIT_RATIO = float(rospy.get_param('~fallback_x_split_ratio', 0.62))
+    FALLBACK_Y_SPLIT_RATIO = float(rospy.get_param('~fallback_y_split_ratio', 0.50))
     DEBUG_LOG = bool(rospy.get_param('~debug_log', True))
 
+    rospy.logwarn('当前识别代码版本: %s' % VERSION_TAG)
     rospy.logwarn('0719低延迟二维码识别启动，订阅: %s' % image_topic)
     rospy.logwarn(
-        '投票参数: need=%d ratio=%.2f max_age=%.1f hold=%.1f interval=%.1f' %
+        '投票参数: need=%d ratio=%.2f max_age=%.1f hold=%.1f interval=%.1f fallback_min=%d split=%.2f' %
         (STABLE_VOTE_NEED, STABLE_RATIO, VOTE_MAX_AGE,
-         PUBLISH_HOLD_SEC, REPUBLISH_INTERVAL)
+         PUBLISH_HOLD_SEC, REPUBLISH_INTERVAL,
+         FALLBACK_MIN_NONEMPTY, FALLBACK_X_SPLIT_RATIO)
     )
 
     rospy.Subscriber(

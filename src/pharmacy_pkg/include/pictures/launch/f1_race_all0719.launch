@@ -1,0 +1,60 @@
+<launch>
+  <!--
+    一键启动小车端比赛节点：
+    1. 初始化小车 smart_pharmacy_demo_init.launch
+    2. 启动 Astra 相机
+    3. 启动 web_video_server
+    4. 启动二维码识别 F1_detect_code0719.py
+    5. 启动独立裁判通信 F1_referee_report0719.py
+    6. 启动导航主控 F1_yaofang0719.py
+
+    注意：RViz / navigation_rviz.launch 建议仍在虚拟机端单独启动，方便手动校准初始位姿。
+  -->
+
+  <arg name="referee_ip" default="192.168.5.2" />
+  <arg name="referee_port" default="8888" />
+  <arg name="listen_ip" default="0.0.0.0" />
+  <arg name="listen_port" default="8888" />
+  <arg name="enable_client" default="true" />
+  <arg name="enable_server" default="false" />
+  <arg name="cv1_wait_timeout" default="5.0" />
+  <arg name="cv1_default_commit_delay" default="3.0" />
+  <arg name="cv1_precache_max_age" default="12.0" />
+  <arg name="cv2_wait_time" default="2.5" />
+  <arg name="stream_url" default="http://192.168.5.4:8080/stream?topic=/camera/rgb/image_raw" />
+
+  <!-- 原比赛初始化：不改导航参数 -->
+  <include file="$(find pharmacy_pkg)/include/pictures/launch/smart_pharmacy_demo_init.launch" />
+
+  <!-- 相机与视频流 -->
+  <include file="$(find astra_camera)/launch/astra.launch" />
+  <node pkg="web_video_server" type="web_video_server" name="web_video_server" output="screen" />
+
+  <!-- 二维码识别：发布 /cam_return 和 /vision_report -->
+  <node pkg="pharmacy_pkg" type="F1_detect_code0719.py" name="detect_abc_0719" output="screen" respawn="true">
+    <param name="stream_url" value="$(arg stream_url)" />
+    <param name="enable_direct_fallback" value="true" />
+  </node>
+
+  <!-- 独立裁判通信：双模式，既能主动连裁判电脑，也能等裁判软件主动连小车 -->
+  <node pkg="pharmacy_pkg" type="F1_referee_report0719.py" name="f1_referee_report0719" output="screen" respawn="true">
+    <param name="server_ip" value="$(arg referee_ip)" />
+    <param name="server_port" value="$(arg referee_port)" />
+    <param name="listen_ip" value="$(arg listen_ip)" />
+    <param name="listen_port" value="$(arg listen_port)" />
+    <param name="enable_client" value="$(arg enable_client)" />
+    <param name="enable_server" value="$(arg enable_server)" />
+    <param name="report_hz" value="2.0" />
+    <param name="connect_timeout" value="0.2" />
+    <param name="reconnect_interval" value="1.0" />
+    <param name="cv2_fallback_to_cv1" value="true" />
+  </node>
+
+  <!-- 导航主控：不含 socket 通信，不改导航参数 -->
+  <node pkg="pharmacy_pkg" type="F1_yaofang0719.py" name="nav_pharmacy" output="screen" required="true">
+    <param name="cv1_wait_timeout" value="$(arg cv1_wait_timeout)" />
+    <param name="cv1_default_commit_delay" value="$(arg cv1_default_commit_delay)" />
+    <param name="cv1_precache_max_age" value="$(arg cv1_precache_max_age)" />
+    <param name="cv2_wait_time" value="$(arg cv2_wait_time)" />
+  </node>
+</launch>
